@@ -19,6 +19,8 @@ The parser extracts the following aggregate metrics from benchmark runs:
 #### Benchmark Identification
 - `uuid`: Unique identifier for the benchmark run
 - `job_name`: Name of the job/benchmark
+- `sample`: Sample number for the benchmark
+- `guidellm_version`: Version of GuideLLM used to generate the benchmark results
 - `timestamp`: ISO 8601 timestamp of benchmark start
 - `backend_model`: Model being benchmarked
 
@@ -155,6 +157,8 @@ The parser outputs a JSON array where:
   {
     "uuid": "c054eaf6-7b10-4dd5-a462-fbc010f7b09d",
     "job_name": "interactive-chat",
+    "sample": 0,
+    "guidellm_version": "0.5.2",
     "timestamp": "2025-09-23T23:59:06.125779",
     "strategy": "constant",
     "rate": 10.0,

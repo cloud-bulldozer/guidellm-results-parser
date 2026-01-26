@@ -47,36 +47,97 @@ def parse_benchmarks(file_path: str, uuid: str, job_name: str, sample: str) -> D
     # Get the first benchmark (assuming single benchmark for now)
     benchmark = benchmarks[0]
     
+    # Extract metadata for guidellm_version
+    metadata = data.get('metadata', {})
+    guidellm_version = metadata.get('guidellm_version', '')
+    
+    # Extract config and args
+    config = benchmark.get('config', {})
+    args = data.get('args', {})
+    
+    # Extract token information from config.requests.data (list format)
+    prompt_tokens = 0
+    output_tokens = 0
+    requests_data = config.get('requests', {}).get('data', '')
+    if isinstance(requests_data, str):
+        # Handle string format: "['prompt_tokens=256,output_tokens=512']"
+        if '=' in requests_data:
+            try:
+                # Extract from string representation
+                data_str = requests_data.strip("[]'\"")
+                if '=' in data_str:
+                    parts = data_str.split(',')
+                    for part in parts:
+                        if 'prompt_tokens=' in part:
+                            prompt_tokens = int(part.split('=')[1])
+                        elif 'output_tokens=' in part:
+                            output_tokens = int(part.split('=')[1])
+            except (ValueError, IndexError):
+                pass
+    elif isinstance(requests_data, list) and len(requests_data) > 0:
+        # Handle list format: ["prompt_tokens=256,output_tokens=512"]
+        data_str = requests_data[0]
+        if '=' in data_str:
+            parts = data_str.split(',')
+            for part in parts:
+                if 'prompt_tokens=' in part:
+                    prompt_tokens = int(part.split('=')[1])
+                elif 'output_tokens=' in part:
+                    output_tokens = int(part.split('=')[1])
+    
+    # Extract strategy information
+    strategy_config = config.get('strategy', {})
+    strategy_type = strategy_config.get('type_', '')
+    
+    # Extract rate from args (it's a list)
+    rate = 0
+    rate_list = args.get('rate', [])
+    if isinstance(rate_list, list) and len(rate_list) > 0:
+        rate = int(rate_list[0])
+    elif strategy_config.get('streams'):
+        # Fallback to streams if rate not available
+        rate = int(strategy_config.get('streams', 0))
+    
     # Extract basic benchmark info
     summary = {
         # Benchmark identification
         "uuid": uuid,
         "job_name": job_name,
         "sample": sample,
+        "guidellm_version": guidellm_version,
         
         # Timing information
         "timestamp": datetime.fromtimestamp(benchmark.get('start_time', 0)).isoformat(),
         
         # Strategy information
-        "strategy": benchmark.get('args', {}).get('strategy', {}).get('type_', ''),
-        "rate": int(benchmark.get('args', {}).get('strategy', {}).get('rate', 0)),
+        "strategy": strategy_type,
+        "rate": rate,
         
-        # Request totals
-        "total_requests": benchmark.get('request_totals', {}).get('total', 0),
-        "successful_requests": benchmark.get('request_totals', {}).get('successful', 0),
-        "errored_requests": benchmark.get('request_totals', {}).get('errored', 0),
-        "incomplete_requests": benchmark.get('request_totals', {}).get('incomplete', 0),
+        # Request totals (from metrics)
+        "total_requests": 0,
+        "successful_requests": 0,
+        "errored_requests": 0,
+        "incomplete_requests": 0,
         
         # Token information
-        "prompt_tokens": benchmark.get('request_loader', {}).get('data', '').split('=')[1].split(',')[0] if '=' in benchmark.get('request_loader', {}).get('data', '') else 0,
-        "output_tokens": benchmark.get('request_loader', {}).get('data', '').split('=')[2] if '=' in benchmark.get('request_loader', {}).get('data', '') else 0,
+        "prompt_tokens": prompt_tokens,
+        "output_tokens": output_tokens,
         
-        # Backend model
-        "backend_model": benchmark.get('worker', {}).get('backend_model', ''),
+        # Backend model (from config.backend.model)
+        "backend_model": config.get('backend', {}).get('model', ''),
     }
     
     # Extract metrics from the metrics section
     metrics = benchmark.get('metrics', {})
+    
+    # Request totals (from metrics.request_totals)
+    request_totals = metrics.get('request_totals', {})
+    summary.update({
+        "total_requests": request_totals.get('total', 0),
+        "successful_requests": request_totals.get('successful', 0),
+        "errored_requests": request_totals.get('errored', 0),
+        "incomplete_requests": request_totals.get('incomplete', 0),
+    })
     
     # Time to First Token (TTFT) metrics
     ttft_metrics = metrics.get('time_to_first_token_ms', {}).get('successful', {})
@@ -138,11 +199,10 @@ def parse_benchmarks(file_path: str, uuid: str, job_name: str, sample: str) -> D
     # Process successful requests (generative_text_response)
     successful_requests = requests.get('successful', [])
     for request in successful_requests:
-        scheduler_info = request.get('scheduler_info', {})
+        request_info = request.get('info', {})
         result.append({
-            "timestamp": datetime.fromtimestamp(scheduler_info.get('request_start', 0)).isoformat(),
-            "errored": scheduler_info.get('errored', False),
-            "completed": scheduler_info.get('completed', False),
+            "timestamp": datetime.fromtimestamp(request.get('request_start_time', 0)).isoformat(),
+            "status": request_info.get('status', False),
             "request_latency_seconds": request.get('request_latency', 0),
             "tokens_per_second": request.get('tokens_per_second', 0),
             "output_tokens_per_second": request.get('output_tokens_per_second', 0),
