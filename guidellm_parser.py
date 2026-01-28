@@ -10,6 +10,7 @@ Supports indexing the results to OpenSearch.
 import json
 import sys
 import argparse
+import socket
 from datetime import datetime
 from typing import Dict, Any, Optional
 
@@ -102,6 +103,7 @@ def parse_benchmarks(file_path: str, uuid: str, job_name: str, sample: str) -> D
     summary = {
         # Benchmark identification
         "uuid": uuid,
+        "hostname": socket.gethostname(),
         "job_name": job_name,
         "sample": sample,
         "guidellm_version": guidellm_version,
