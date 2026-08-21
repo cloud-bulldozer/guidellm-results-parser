@@ -19,7 +19,7 @@ from opensearchpy.exceptions import ConnectionError, RequestError
 from opensearchpy.helpers import bulk
 
 
-def parse_benchmarks(file_path: str, uuid: str, job_name: str, sample: str) -> Dict[str, Any]:
+def parse_benchmarks(file_path: str, uuid: str, job_name: str, sample: str, verbose: bool = False) -> Dict[str, Any]:
     """
     Parse the benchmarks.json file and extract key metrics.
     
@@ -102,6 +102,7 @@ def parse_benchmarks(file_path: str, uuid: str, job_name: str, sample: str) -> D
     # Extract basic benchmark info
     summary = {
         # Benchmark identification
+        "metricName": "guidellmBenchmarkSummary",
         "uuid": uuid,
         "hostname": socket.gethostname(),
         "job_name": job_name,
@@ -141,94 +142,65 @@ def parse_benchmarks(file_path: str, uuid: str, job_name: str, sample: str) -> D
         "incomplete_requests": request_totals.get('incomplete', 0),
     })
     
-    # Time to First Token (TTFT) metrics
-    ttft_metrics = metrics.get('time_to_first_token_ms', {}).get('successful', {})
-    summary.update({
-        "ttft_mean_ms": ttft_metrics.get('mean', 0),
-        "ttft_p99_ms": ttft_metrics.get('percentiles', {}).get('p99', 0),
-    })
-    
-    # Inter Token Latency (ITL) metrics
-    itl_metrics = metrics.get('inter_token_latency_ms', {}).get('successful', {})
-    summary.update({
-        "itl_mean_ms": itl_metrics.get('mean', 0),
-        "itl_p99_ms": itl_metrics.get('percentiles', {}).get('p99', 0),
-    })
-    
-    # Throughput (requests per second) metrics
-    throughput_metrics = metrics.get('requests_per_second', {}).get('successful', {})
-    summary.update({
-        "throughput_mean_rps": throughput_metrics.get('mean', 0),
-        "throughput_p95_rps": throughput_metrics.get('percentiles', {}).get('p95', 0),
-        "throughput_p99_rps": throughput_metrics.get('percentiles', {}).get('p99', 0),
-    })
-    
-    # Additional useful metrics
-    request_latency = metrics.get('request_latency', {}).get('successful', {})
-    summary.update({
-        "request_latency_mean_seconds": request_latency.get('mean', 0),
-        "request_latency_p95_seconds": request_latency.get('percentiles', {}).get('p95', 0),
-        "request_latency_p99_seconds": request_latency.get('percentiles', {}).get('p99', 0),
-    })
-    
-    # Token generation metrics
-    tokens_per_second = metrics.get('tokens_per_second', {}).get('successful', {})
-    summary.update({
-        "tokens_per_second_mean": tokens_per_second.get('mean', 0),
-        "tokens_per_second_p95": tokens_per_second.get('percentiles', {}).get('p95', 0),
-        "tokens_per_second_p99": tokens_per_second.get('percentiles', {}).get('p99', 0),
-    })
-    
-    # Output tokens per second
-    output_tokens_per_second = metrics.get('output_tokens_per_second', {}).get('successful', {})
-    summary.update({
-        "output_tokens_per_second_mean": output_tokens_per_second.get('mean', 0),
-        "output_tokens_per_second_p95": output_tokens_per_second.get('percentiles', {}).get('p95', 0),
-        "output_tokens_per_second_p99": output_tokens_per_second.get('percentiles', {}).get('p99', 0),
-    })
-    
-    # Time per output token
-    time_per_output_token = metrics.get('time_per_output_token_ms', {}).get('successful', {})
-    summary.update({
-        "time_per_output_token_mean_ms": time_per_output_token.get('mean', 0),
-        "time_per_output_token_p95_ms": time_per_output_token.get('percentiles', {}).get('p95', 0),
-        "time_per_output_token_p99_ms": time_per_output_token.get('percentiles', {}).get('p99', 0),
-    })
+    def extract_metric(metric_data, prefix, suffix=""):
+        percentiles = metric_data.get('percentiles', {})
+        sfx = f"_{suffix}" if suffix else ""
+        return {
+            f"{prefix}_mean{sfx}": metric_data.get('mean', 0),
+            f"{prefix}_max{sfx}": metric_data.get('max', 0),
+            f"{prefix}_p50{sfx}": percentiles.get('p50', 0),
+            f"{prefix}_p75{sfx}": percentiles.get('p75', 0),
+            f"{prefix}_p90{sfx}": percentiles.get('p90', 0),
+            f"{prefix}_p95{sfx}": percentiles.get('p95', 0),
+            f"{prefix}_p99{sfx}": percentiles.get('p99', 0),
+        }
+
+    summary.update(extract_metric(
+        metrics.get('time_to_first_token_ms', {}).get('successful', {}), "ttft", "ms"))
+    summary.update(extract_metric(
+        metrics.get('inter_token_latency_ms', {}).get('successful', {}), "itl", "ms"))
+    summary.update(extract_metric(
+        metrics.get('requests_per_second', {}).get('successful', {}), "throughput", "rps"))
+    summary.update(extract_metric(
+        metrics.get('request_latency', {}).get('successful', {}), "request_latency", "seconds"))
+    summary.update(extract_metric(
+        metrics.get('tokens_per_second', {}).get('successful', {}), "tokens_per_second"))
+    summary.update(extract_metric(
+        metrics.get('output_tokens_per_second', {}).get('successful', {}), "output_tokens_per_second"))
+    summary.update(extract_metric(
+        metrics.get('time_per_output_token_ms', {}).get('successful', {}), "time_per_output_token", "ms"))
     
     result = [summary]
-    requests = benchmark.get('requests', {})
-    
-    # Process successful requests (generative_text_response)
-    successful_requests = requests.get('successful', [])
-    for request in successful_requests:
-        request_info = request.get('info', {})
-        result.append({
-            "timestamp": datetime.fromtimestamp(request.get('request_start_time', 0)).isoformat(),
-            "status": request_info.get('status', False),
-            "request_latency_seconds": request.get('request_latency', 0),
-            "tokens_per_second": request.get('tokens_per_second', 0),
-            "output_tokens_per_second": request.get('output_tokens_per_second', 0),
-            "tpot_ms": request.get('time_per_output_token_ms', 0),
-            "itl_ms": request.get('inter_token_latency_ms', 0),
-            "ttft_ms": request.get('time_to_first_token_ms', 0),
-            "uuid": uuid,
-            "job_name": job_name,
-            "sample": sample,
-        })
-    
-    # Process errored requests (generative_text_error)
-    errored_requests = requests.get('errored', [])
-    for request in errored_requests:
-        scheduler_info = request.get('scheduler_info', {})
-        result.append({
-            "timestamp": datetime.fromtimestamp(scheduler_info.get('request_start', 0)).isoformat(),
-            "errored": scheduler_info.get('errored', True),
-            "completed": scheduler_info.get('completed', False),
-            "uuid": uuid,
-            "job_name": job_name,
-        })
-    
-    
+
+    if verbose:
+        requests = benchmark.get('requests', {})
+
+        for request in requests.get('successful', []):
+            result.append({
+                "metricName": "guidellmRequestResult",
+                "timestamp": datetime.fromtimestamp(request.get('start_time', 0)).isoformat(),
+                "request_latency_seconds": request.get('request_latency', 0),
+                "tokens_per_second": request.get('tokens_per_second', 0),
+                "output_tokens_per_second": request.get('output_tokens_per_second', 0),
+                "tpot_ms": request.get('time_per_output_token_ms', 0),
+                "itl_ms": request.get('inter_token_latency_ms', 0),
+                "ttft_ms": request.get('time_to_first_token_ms', 0),
+                "uuid": uuid,
+                "job_name": job_name,
+                "sample": sample,
+            })
+
+        for request in requests.get('errored', []) + requests.get('incomplete', []):
+            result.append({
+                "metricName": "guidellmRequestError",
+                "timestamp": datetime.fromtimestamp(request.get('start_time', 0)).isoformat(),
+                "request_latency_seconds": request.get('request_latency', 0),
+                "error": request.get('error', ''),
+                "uuid": uuid,
+                "job_name": job_name,
+                "sample": sample,
+            })
+
     return result
 
 
@@ -293,11 +265,13 @@ def main():
     parser.add_argument('--output', '-o', help='Output file path (default: stdout)')
     parser.add_argument('--job-name', '-j', help='Job Name', default='')
     parser.add_argument('--sample', '-s', help='Sample number', default=0)
-    
+    parser.add_argument('--verbose', '-v', action='store_true',
+                        help='Include per-request details (successful and errored)')
+
     args = parser.parse_args()
-    
+
     # Parse benchmarks
-    results = parse_benchmarks(args.results, args.uuid, args.job_name, args.sample)
+    results = parse_benchmarks(args.results, args.uuid, args.job_name, args.sample, args.verbose)
     
     # Index to OpenSearch if endpoint and index are provided
     if args.es_server and args.es_index:
