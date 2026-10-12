@@ -197,7 +197,7 @@ The parser outputs a JSON array where:
     "hostname": "benchmark-pod-0",
     "job_name": "interactive-chat",
     "sample": 0,
-    "guidellm_version": "0.5.2",
+    "guidellm_version": "0.8.1",
     "timestamp": "2025-09-23T23:59:06.125779",
     "strategy": "constant",
     "rate": 10,
@@ -310,11 +310,19 @@ Filter documents by type using the `metricName` field:
 
 This parser is designed to work with benchmark results from [GuideLLM](https://github.com/vllm-project/guidellm), a performance evaluation tool for large language models. GuideLLM generates comprehensive benchmark results in JSON format, which this parser processes into a structured format suitable for analysis and visualization.
 
+The container image is built on `ghcr.io/vllm-project/guidellm:v0.8.1`. The parser also reads the older
+pre-0.7 report layout, so results captured with earlier GuideLLM releases still parse.
+
 ### Typical Workflow
 
 1. Run GuideLLM benchmark:
    ```bash
-   guidellm --model your-model --backend openai --rate 10 --max-duration 60s --output-format json > benchmarks.json
+   guidellm run \
+     --backend kind=openai_http,target=http://your-endpoint:8000,model=your-model \
+     --profile kind=constant,rate=10 \
+     --constraint kind=max_duration,seconds=60 \
+     --data kind=synthetic_text,prompt_tokens=256,output_tokens=512 \
+     --output kind=json,path=benchmarks.json
    ```
 
 2. Parse the results (summary only):

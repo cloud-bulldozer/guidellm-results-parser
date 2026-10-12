@@ -19,6 +19,73 @@ from opensearchpy.exceptions import ConnectionError, RequestError
 from opensearchpy.helpers import bulk
 
 
+def extract_token_config(spec: Dict[str, Any], config: Dict[str, Any]) -> tuple:
+    """
+    Extract the configured prompt/output token counts.
+
+    guidellm >= 0.7 records the dataset spec as structured objects under
+    config.spec.data, e.g. [{"kind": "synthetic_text", "prompt_tokens": 256,
+    "output_tokens": 512, ...}]. Older releases embedded it as a
+    "prompt_tokens=256,output_tokens=512" string on benchmark.config.requests.data.
+
+    Args:
+        spec: The top-level config.spec dictionary (empty on older releases)
+        config: The per-benchmark config dictionary
+    Returns:
+        Tuple of (prompt_tokens, output_tokens)
+    """
+    for entry in spec.get('data', []) or []:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get('prompt_tokens') is not None or entry.get('output_tokens') is not None:
+            return int(entry.get('prompt_tokens') or 0), int(entry.get('output_tokens') or 0)
+
+    prompt_tokens = 0
+    output_tokens = 0
+    requests_data = config.get('requests', {})
+    requests_data = requests_data.get('data', '') if isinstance(requests_data, dict) else ''
+    if isinstance(requests_data, list):
+        # Handle list format: ["prompt_tokens=256,output_tokens=512"]
+        requests_data = requests_data[0] if requests_data else ''
+    if isinstance(requests_data, str) and '=' in requests_data:
+        # Handle string format: "['prompt_tokens=256,output_tokens=512']"
+        try:
+            for part in requests_data.strip("[]'\"").split(','):
+                if 'prompt_tokens=' in part:
+                    prompt_tokens = int(part.split('=')[1])
+                elif 'output_tokens=' in part:
+                    output_tokens = int(part.split('=')[1])
+        except (ValueError, IndexError):
+            pass
+
+    return prompt_tokens, output_tokens
+
+
+def extract_rate(strategy_config: Dict[str, Any], spec: Dict[str, Any], args: Dict[str, Any]) -> int:
+    """
+    Extract the configured request rate.
+
+    guidellm >= 0.7 records it on benchmark.config.strategy.rate (and on
+    config.spec.profile.rate as a list). Older releases only had args.rate.
+
+    Args:
+        strategy_config: The benchmark.config.strategy dictionary
+        spec: The top-level config.spec dictionary (empty on older releases)
+        args: The top-level args dictionary (empty on newer releases)
+    Returns:
+        The rate as an integer, or 0 when unavailable
+    """
+    for candidate in (strategy_config.get('rate'),
+                      (spec.get('profile') or {}).get('rate'),
+                      args.get('rate'),
+                      strategy_config.get('streams')):
+        if isinstance(candidate, list):
+            candidate = candidate[0] if candidate else None
+        if candidate:
+            return int(candidate)
+    return 0
+
+
 def parse_benchmarks(file_path: str, uuid: str, job_name: str, sample: str, verbose: bool = False) -> Dict[str, Any]:
     """
     Parse the benchmarks.json file and extract key metrics.
@@ -55,50 +122,21 @@ def parse_benchmarks(file_path: str, uuid: str, job_name: str, sample: str, verb
     # Extract config and args
     config = benchmark.get('config', {})
     args = data.get('args', {})
-    
-    # Extract token information from config.requests.data (list format)
-    prompt_tokens = 0
-    output_tokens = 0
-    requests_data = config.get('requests', {}).get('data', '')
-    if isinstance(requests_data, str):
-        # Handle string format: "['prompt_tokens=256,output_tokens=512']"
-        if '=' in requests_data:
-            try:
-                # Extract from string representation
-                data_str = requests_data.strip("[]'\"")
-                if '=' in data_str:
-                    parts = data_str.split(',')
-                    for part in parts:
-                        if 'prompt_tokens=' in part:
-                            prompt_tokens = int(part.split('=')[1])
-                        elif 'output_tokens=' in part:
-                            output_tokens = int(part.split('=')[1])
-            except (ValueError, IndexError):
-                pass
-    elif isinstance(requests_data, list) and len(requests_data) > 0:
-        # Handle list format: ["prompt_tokens=256,output_tokens=512"]
-        data_str = requests_data[0]
-        if '=' in data_str:
-            parts = data_str.split(',')
-            for part in parts:
-                if 'prompt_tokens=' in part:
-                    prompt_tokens = int(part.split('=')[1])
-                elif 'output_tokens=' in part:
-                    output_tokens = int(part.split('=')[1])
-    
+    # guidellm >= 0.7 moved the invocation spec to a top-level "config.spec"
+    spec = data.get('config', {}).get('spec', {})
+
+    prompt_tokens, output_tokens = extract_token_config(spec, config)
+
     # Extract strategy information
     strategy_config = config.get('strategy', {})
     strategy_type = strategy_config.get('type_', '')
-    
-    # Extract rate from args (it's a list)
-    rate = 0
-    rate_list = args.get('rate', [])
-    if isinstance(rate_list, list) and len(rate_list) > 0:
-        rate = int(rate_list[0])
-    elif strategy_config.get('streams'):
-        # Fallback to streams if rate not available
-        rate = int(strategy_config.get('streams', 0))
-    
+
+    rate = extract_rate(strategy_config, spec, args)
+
+    # Backend model lives on the benchmark config, or on the run spec in >= 0.7
+    backend_model = config.get('backend', {}).get('model', '') or \
+        spec.get('backend', {}).get('model', '')
+
     # Extract basic benchmark info
     summary = {
         # Benchmark identification
@@ -127,7 +165,7 @@ def parse_benchmarks(file_path: str, uuid: str, job_name: str, sample: str, verb
         "output_tokens": output_tokens,
         
         # Backend model (from config.backend.model)
-        "backend_model": config.get('backend', {}).get('model', ''),
+        "backend_model": backend_model,
     }
     
     # Extract metrics from the metrics section
@@ -175,10 +213,31 @@ def parse_benchmarks(file_path: str, uuid: str, job_name: str, sample: str, verb
     if verbose:
         requests = benchmark.get('requests', {})
 
-        for request in requests.get('successful', []):
+        # guidellm >= 0.7 renamed start_time to request_start_time and moved
+        # the failure reason onto the request's info object.
+        def request_start(request):
+            return request.get('request_start_time') or request.get('start_time', 0)
+
+        def request_error(request):
+            return (request.get('info') or {}).get('error') or request.get('error', '')
+
+        # benchmark.start_time/end_time bound the measured window, but the
+        # request lists also carry the warmup and cooldown requests that
+        # metrics.request_totals deliberately excludes. Drop them so the
+        # per-request documents agree with the summary. Boundary requests may
+        # be classified a request either way, so counts can differ by one.
+        window_start = benchmark.get('start_time')
+        window_end = benchmark.get('end_time')
+
+        def in_window(request):
+            if not window_start or not window_end:
+                return True
+            return window_start <= request_start(request) <= window_end
+
+        for request in filter(in_window, requests.get('successful') or []):
             result.append({
                 "metricName": "guidellmRequestResult",
-                "timestamp": datetime.fromtimestamp(request.get('start_time', 0)).isoformat(),
+                "timestamp": datetime.fromtimestamp(request_start(request)).isoformat(),
                 "request_latency_seconds": request.get('request_latency', 0),
                 "tokens_per_second": request.get('tokens_per_second', 0),
                 "output_tokens_per_second": request.get('output_tokens_per_second', 0),
@@ -190,12 +249,12 @@ def parse_benchmarks(file_path: str, uuid: str, job_name: str, sample: str, verb
                 "sample": sample,
             })
 
-        for request in requests.get('errored', []) + requests.get('incomplete', []):
+        for request in filter(in_window, (requests.get('errored') or []) + (requests.get('incomplete') or [])):
             result.append({
                 "metricName": "guidellmRequestError",
-                "timestamp": datetime.fromtimestamp(request.get('start_time', 0)).isoformat(),
+                "timestamp": datetime.fromtimestamp(request_start(request)).isoformat(),
                 "request_latency_seconds": request.get('request_latency', 0),
-                "error": request.get('error', ''),
+                "error": request_error(request),
                 "uuid": uuid,
                 "job_name": job_name,
                 "sample": sample,
